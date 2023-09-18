@@ -150,6 +150,73 @@ public:
         SC_THREAD(fetch_then_exec);
     }
 
+    /* Transfer data from the Host 2 the Card (h2c = true),
+	   Card 2 Host (h2c = false).  */
+    /* Need to be modified to deal with the corner condition.
+        the left part of XDMA that connected to the pcie-ctrl should use tlm trans
+        while the right part that connected to the DUT should analysis the valid data.
+        The transfer per clock should only with 8-bytes.(data width)  */ 
+    int do_mm_dma(uint64_t src_addr, uint64_t dst_addr, uint64_t size,
+        bool h2c)
+    {
+		uint64_t i;
+		sc_time delay(SC_ZERO_TIME);
+		struct {
+			tlm::tlm_generic_payload trans;
+			const char *name;
+		} trans_ext[2];
+		uint64_t data;
+
+		trans_ext[0].trans.set_command(tlm::TLM_READ_COMMAND);
+		trans_ext[0].trans.set_data_ptr((unsigned char *)&data);
+		trans_ext[0].trans.set_streaming_width(8);
+		trans_ext[0].trans.set_data_length(8);
+
+		trans_ext[1].trans.set_command(tlm::TLM_WRITE_COMMAND);
+		trans_ext[1].trans.set_data_ptr((unsigned char *)&data);
+		trans_ext[1].trans.set_streaming_width(8);
+		trans_ext[1].trans.set_data_length(8);
+
+		for (i = 0; i < size-8; i+=8) {
+			trans_ext[0].trans.set_address(src_addr);
+			trans_ext[1].trans.set_address(dst_addr);
+			src_addr += 8;
+			dst_addr += 8;
+
+			if (h2c) {
+				this->dma->b_transport(
+					trans_ext[0].trans, delay);
+			} else {
+				this->card_bus->b_transport(
+					trans_ext[0].trans, delay);
+			}
+
+			if (trans_ext[0].trans.get_response_status() !=
+				tlm::TLM_OK_RESPONSE) {
+				SC_REPORT_ERROR("xdma",
+					"error while fetching the data");
+				return -1;
+			}
+
+			if (h2c) {
+				this->card_bus->b_transport(
+					trans_ext[1].trans, delay);
+			} else {
+				this->dma->b_transport(
+					trans_ext[1].trans, delay);
+			}
+
+			if (trans_ext[1].trans.get_response_status() !=
+				tlm::TLM_OK_RESPONSE) {
+				SC_REPORT_ERROR("xdma",
+					"error while pushing the data");
+				return -1;
+			}
+		}
+
+		return 0;
+	}
+
     void fetch_then_exec() {
         // init vars
         h2c_dsc_byp_ready.write(true);
