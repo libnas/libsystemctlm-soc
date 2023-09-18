@@ -36,17 +36,17 @@ using namespace std;
 #define AXIS_STOP 1 << 0
 #define AXIS_COMPLETED 1 << 1
 #define AXIS_EOP 1 << 4
-#define MAX_LEN_PER_TRANSFER 1024
+#define MAX_LEN_PER_TRANSFER 8
 #define D(x)
-u32 regs[XDMA_MAX_SIZE >> 2];
+uint32_t regs[XDMA_MAX_SIZE >> 2];
 const int config_bar_pos = 0;
 const int bypass_bar_pos = 1;
 
-void init_write(u32 *regs, u32 tmp, u32 addr) {
+void init_write(uint32_t *regs, uint32_t tmp, uint32_t addr) {
     memcpy(regs + addr, &tmp, 4);
 }
 
-void init_regs(u32 *regs) {
+void init_regs(uint32_t *regs) {
     memset(regs, 0, XDMA_MAX_SIZE);
     init_write(regs, 0x1FC00003, 0x0000);
     init_write(regs, 0x00010120, 0x004C);
@@ -75,6 +75,10 @@ public:
 	tlm_utils::simple_target_socket<xdma> user_bar;
 	tlm_utils::simple_initiator_socket<xdma> dma;
 	sc_vector<sc_out<bool> > irq;
+
+    /* H2C0 and C2H0 channels. */
+    tlm_utils::simple_initiator_socket<xdma> h2c0_channel;
+    tlm_utils::simple_target_socket<xdma> c2h0_channel;
 
     /* H2C signals.  */
     sc_in<bool> m_axis_h2c_tready;
@@ -108,6 +112,13 @@ public:
     sc_in<sc_bv<28> > c2h_dsc_byp_len;
     sc_in<sc_bv<16> > c2h_dsc_byp_ctl;
 
+    /* Global Vars to store sth.  */
+    bool nxt_clk_h2c = false;
+    bool nxt_clk_c2h = false;
+    bool h2c_idle = true;
+    bool c2h_idle = true;
+    sc_mutex m_mutex;
+
     xdma(sc_core::sc_module_name name) :
         pci_device_base(name, NR_MMIO_BAR, NR_IRQ),
 		rst("rst"),
@@ -116,6 +127,8 @@ public:
 		config_bar("config_bar"),
 		user_bar("user_bar"),
 		dma("dma"),
+        h2c0_channel("h2c0_channel"),
+        c2h0_channel("c2h0_channel"),
 		irq("irq", NR_QDMA_IRQ),
 
         m_axis_h2c_tready("m_axis_h2c_tready"),
@@ -147,7 +160,12 @@ public:
         c2h_dsc_byp_ctl("c2h_dsc_byp_ctl")
     {
         init_regs(&regs);
-        SC_THREAD(fetch_then_exec);
+        // init vars
+        h2c_dsc_byp_ready.write(true);
+        c2h_dsc_byp_ready.write(true);
+        
+        // In tg-tlm.h, to generate a transfer and send it to the socket.
+        h2c0_channel.register_b_transport(this, &xdma::b_transport);
     }
 
     /* Transfer data from the Host 2 the Card (h2c = true),
@@ -156,9 +174,9 @@ public:
         the left part of XDMA that connected to the pcie-ctrl should use tlm trans
         while the right part that connected to the DUT should analysis the valid data.
         The transfer per clock should only with 8-bytes.(data width)  */ 
-    int do_mm_dma(uint64_t src_addr, uint64_t dst_addr, uint64_t size,
-        bool h2c)
-    {
+	int do_mm_dma(uint64_t src_addr, uint64_t dst_addr, uint64_t size,
+			bool h2c)
+	{
 		uint64_t i;
 		sc_time delay(SC_ZERO_TIME);
 		struct {
@@ -218,23 +236,16 @@ public:
 	}
 
     void fetch_then_exec() {
-        // init vars
-        h2c_dsc_byp_ready.write(true);
-        bool nxt_clk_h2c = false;
-        c2h_dsc_byp_ready.write(true);
-        bool nxt_clk_c2h = false;
-        bool h2c_idle = true;
-        bool c2h_idle = true;
 
-        u64 tmp_h2c_dsc_byp_src_addr = 0;
-        u64 tmp_h2c_dsc_byp_dst_addr = 0;
-        u32 tmp_h2c_dsc_byp_len = 0;
-        u16 tmp_h2c_dsc_byp_ctl = 0;
+        uint64_t tmp_h2c_dsc_byp_src_addr = 0;
+        uint64_t tmp_h2c_dsc_byp_dst_addr = 0;
+        uint32_t tmp_h2c_dsc_byp_len = 0;
+        uint16_t tmp_h2c_dsc_byp_ctl = 0;
 
-        u64 tmp_c2h_dsc_byp_src_addr = 0;
-        u64 tmp_c2h_dsc_byp_dst_addr = 0;
-        u32 tmp_c2h_dsc_byp_len = 0;
-        u16 tmp_c2h_dsc_byp_ctl = 0;
+        uint64_t tmp_c2h_dsc_byp_src_addr = 0;
+        uint64_t tmp_c2h_dsc_byp_dst_addr = 0;
+        uint32_t tmp_c2h_dsc_byp_len = 0;
+        uint16_t tmp_c2h_dsc_byp_ctl = 0;
 
         while(true) {
             /* h2c_recv_dsc_byp()  */
@@ -286,6 +297,7 @@ public:
             }
 
             /* h2c_send()  */
+            // Using SC_THREAD
             if(!h2c_idle) {
                 if(tmp_h2c_dsc_byp_len <= MAX_LEN_PER_TRANSFER) {
                     m_axis_h2c_tlast.write(true);
@@ -309,11 +321,17 @@ public:
             }
 
             /* c2h_recv()  */
+            // Using b_transport
             if(!c2h_idle) {
 
             }
         }
 
+
+    }
+
+    // SC_THREAD for axis-slave
+    void c2h_thread() {
 
     }
 
