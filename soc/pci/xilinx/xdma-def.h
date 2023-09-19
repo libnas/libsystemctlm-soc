@@ -118,6 +118,18 @@ public:
     bool h2c_idle = true;
     bool c2h_idle = true;
     sc_mutex m_mutex;
+    uint64_t tmp_h2c_dsc_byp_src_addr = 0;
+    uint64_t tmp_h2c_dsc_byp_dst_addr = 0;
+    uint32_t tmp_h2c_dsc_byp_len = 0;
+    uint16_t tmp_h2c_dsc_byp_ctl = 0;
+    uint64_t tmp_c2h_dsc_byp_src_addr = 0;
+    uint64_t tmp_c2h_dsc_byp_dst_addr = 0;
+    uint32_t tmp_c2h_dsc_byp_len = 0;
+    uint16_t tmp_c2h_dsc_byp_ctl = 0;
+    sc_time delay(SC_ZERO_TIME);
+
+    // execute in order
+    sc_event e_before, e_after_h2c, e_after_c2h;
 
     xdma(sc_core::sc_module_name name) :
         pci_device_base(name, NR_MMIO_BAR, NR_IRQ),
@@ -166,6 +178,10 @@ public:
         
         // In tg-tlm.h, to generate a transfer and send it to the socket.
         h2c0_channel.register_b_transport(this, &xdma::b_transport);
+
+        SC_THREAD(before_clk);
+        SC_THREAD(after_clk_h2c);
+        SC_THREAD(after_clk_c2h);
     }
 
     /* Transfer data from the Host 2 the Card (h2c = true),
@@ -174,6 +190,7 @@ public:
         the left part of XDMA that connected to the pcie-ctrl should use tlm trans
         while the right part that connected to the DUT should analysis the valid data.
         The transfer per clock should only with 8-bytes.(data width)  */ 
+    /*
 	int do_mm_dma(uint64_t src_addr, uint64_t dst_addr, uint64_t size,
 			bool h2c)
 	{
@@ -234,20 +251,18 @@ public:
 
 		return 0;
 	}
+    */
 
-    void fetch_then_exec() {
-
-        uint64_t tmp_h2c_dsc_byp_src_addr = 0;
-        uint64_t tmp_h2c_dsc_byp_dst_addr = 0;
-        uint32_t tmp_h2c_dsc_byp_len = 0;
-        uint16_t tmp_h2c_dsc_byp_ctl = 0;
-
-        uint64_t tmp_c2h_dsc_byp_src_addr = 0;
-        uint64_t tmp_c2h_dsc_byp_dst_addr = 0;
-        uint32_t tmp_c2h_dsc_byp_len = 0;
-        uint16_t tmp_c2h_dsc_byp_ctl = 0;
-
+    void before_clk() {
+        wait(SC_ZERO_TIME);
+        bool first = true;
         while(true) {
+            wait(clk.posedge_event() | rst.negedge_event());
+            if(!first) {
+                wait(e_after_h2c & e_after_c2h);
+                first = false;
+            }
+
             /* h2c_recv_dsc_byp()  */
             if(nxt_clk_h2c) {
                 h2c_dsc_byp_ready.write(false);
@@ -270,39 +285,36 @@ public:
                 c2h_dsc_byp_ready.write(true);
             }
 
+            e_before.notify();
+
+        }
+    }
+
+    void after_clk_h2c() {
+        while(true) {
             wait(clk.posedge_event() | rst.negedge_event());
+            wait(e_before);
 
             /* h2c_recv_dsc_byp()  */
             if(h2c_dsc_byp_ready.read() && h2c_dsc_byp_load.read()) {
-                /*
+                nxt_clk_h2c = true;
+
                 tmp_h2c_dsc_byp_src_addr = h2c_dsc_byp_src_addr;
                 tmp_h2c_dsc_byp_dst_addr = h2c_dsc_byp_dst_addr;
                 tmp_h2c_dsc_byp_len = h2c_dsc_byp_len;
                 tmp_h2c_dsc_byp_ctl = h2c_dsc_byp_ctl;
-                */
-                // delay
-                nxt_clk_h2c = true;
-            }
-
-            /* c2h_recv_dsc_byp()  */
-            if(c2h_dsc_byp_ready.read() && c2h_dsc_byp_load.read()) {
-                /*
-                tmp_c2h_dsc_byp_src_addr = c2h_dsc_byp_src_addr;
-                tmp_c2h_dsc_byp_dst_addr = c2h_dsc_byp_dst_addr;
-                tmp_c2h_dsc_byp_len = c2h_dsc_byp_len;
-                tmp_c2h_dsc_byp_ctl = c2h_dsc_byp_ctl;
-                */
-                // delay
-                nxt_clk_c2h = true;
             }
 
             /* h2c_send()  */
-            // Using SC_THREAD
+            // only need to use the h2c_src_addr ans size
+            /* Using trans.get_extension(genattr); and genattr->set_eop(true) to
+                set up the tlast signal  */
+            // Set up 
             if(!h2c_idle) {
                 if(tmp_h2c_dsc_byp_len <= MAX_LEN_PER_TRANSFER) {
                     m_axis_h2c_tlast.write(true);
                     m_axis_h2c_tvalid.write(true);
-                    // delay
+                    // Using tlm2axis bridge b_transport()
                     /* Do transfer Write(tmp_h2c_dsc_byp_src_addr, tmp_h2c_dsc_byp_dst_addr, 
                         tmp_h2c_dsc_byp_len)  */
                     h2c_idle = true;
@@ -311,7 +323,7 @@ public:
                 }
                 else {
                     m_axis_h2c_tvalid.write(true);
-                    // delay
+                    // Using tlm2axis bridge b_transport()
                     /* Do transfer Write(tmp_h2c_dsc_byp_src_addr, tmp_h2c_dsc_byp_dst_addr, 
                         MAX_LEN_PER_TRANSFER)  */
                     tmp_h2c_dsc_byp_src_addr += MAX_LEN_PER_TRANSFER;
@@ -320,19 +332,36 @@ public:
                 }
             }
 
+            e_after_h2c.notify();
+
+        }
+    }
+
+    void after_clk_c2h() {
+        while(true) {
+            wait(clk.posedge_event() | rst.negedge_event());
+            wait(e_before);
+
+            /* c2h_recv_dsc_byp()  */
+            if(c2h_dsc_byp_ready.read() && c2h_dsc_byp_load.read()) {
+                nxt_clk_c2h = true;
+                
+                tmp_c2h_dsc_byp_src_addr = c2h_dsc_byp_src_addr;
+                tmp_c2h_dsc_byp_dst_addr = c2h_dsc_byp_dst_addr;
+                tmp_c2h_dsc_byp_len = c2h_dsc_byp_len;
+                tmp_c2h_dsc_byp_ctl = c2h_dsc_byp_ctl;
+            }
+
+            // SC_THREAD for axis-slave
+            // only need to use the c2h_dst_addr
             /* c2h_recv()  */
             // Using b_transport
             if(!c2h_idle) {
 
             }
+
+            e_after_c2h.notify();
         }
-
-
-    }
-
-    // SC_THREAD for axis-slave
-    void c2h_thread() {
-
     }
 
 };
