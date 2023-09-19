@@ -44,6 +44,8 @@ SC_MODULE(TLMTrafficGenerator)
 	typedef void (*DoneCallback)(TLMTrafficGenerator *gen, int threadID);
 
 	tlm_utils::simple_initiator_socket<TLMTrafficGenerator> socket;
+	char buffer[1200] = {0}; //1KB Max len per trans
+	unsigned int buffer_len = 0;
 
 	SC_HAS_PROCESS(TLMTrafficGenerator);
 	TLMTrafficGenerator(sc_core::sc_module_name name, int numThreads = 1) :
@@ -231,6 +233,12 @@ private:
 			}
 
 			socket->b_transport(trans, delay);
+
+			// Save read data to buffer
+			buffer_len = trans.get_data_length();
+			for (uint32_t i = 0; i < buffer_len; i++) {
+				buffer[i] = static_cast<char>(trans.get_data_ptr()[i]);
+			}
 
 			if ( trans.is_response_error() ) {
 				// Print response string
