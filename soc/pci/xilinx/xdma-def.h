@@ -16,6 +16,8 @@
 
 #include "tlm-bridges/amba.h"
 #include "tlm-extensions/genattr.h"
+#include "tlm-bridges/tlm2axis-bridge.h"
+#include "tlm-bridges/axis2tlm-bridge.h"
 
 using namespace sc_core;
 using namespace sc_dt;
@@ -61,24 +63,21 @@ void init_regs(uint32_t *regs) {
     init_write(regs, 0x00004006, 0x304C);
 }
 
-template <int NUM_USR_IRQ>
 class xdma : public pci_device_base
 {
 public:
 	SC_HAS_PROCESS(xdma);
-    sc_in<bool> rst;
+    sc_in<bool> resetn;
     sc_in<bool> clk;
-	tlm_utils::simple_initiator_socket<xdma> card_bus;
 
 	/* Interface to toward PCIE.  */
 	tlm_utils::simple_target_socket<xdma> config_bar;
 	tlm_utils::simple_target_socket<xdma> user_bar;
 	tlm_utils::simple_initiator_socket<xdma> dma;
-	sc_vector<sc_out<bool> > irq;
 
     /* H2C0 and C2H0 channels. */
-    tlm_utils::simple_initiator_socket<xdma> h2c0_channel;
-    tlm_utils::simple_target_socket<xdma> c2h0_channel;
+    tlm_utils::simple_target_socket<xdma> h2c0_channel;
+    tlm_utils::simple_initiator_socket<xdma> c2h0_channel;
 
     /* H2C signals.  */
     sc_in<bool> m_axis_h2c_tready;
@@ -133,15 +132,13 @@ public:
 
     xdma(sc_core::sc_module_name name) :
         pci_device_base(name, NR_MMIO_BAR, NR_IRQ),
-		rst("rst"),
+		resetn("resetn"),
         clk("clk"),
-		card_bus("card_initiator_socket"),
-		config_bar("config_bar"),
-		user_bar("user_bar"),
+		config_bar("config_bar"), // bar_num = 1
+		user_bar("user_bar"), // bar_num = 0
 		dma("dma"),
         h2c0_channel("h2c0_channel"),
         c2h0_channel("c2h0_channel"),
-		irq("irq", NR_QDMA_IRQ),
 
         m_axis_h2c_tready("m_axis_h2c_tready"),
         m_axis_h2c_tlast("m_axis_h2c_tlast"),
@@ -171,13 +168,15 @@ public:
         c2h_dsc_byp_len("c2h_dsc_byp_len"),
         c2h_dsc_byp_ctl("c2h_dsc_byp_ctl")
     {
-        init_regs(&regs);
+        init_regs(&regs[0]);
         // init vars
         h2c_dsc_byp_ready.write(true);
         c2h_dsc_byp_ready.write(true);
         
         // In tg-tlm.h, to generate a transfer and send it to the socket.
-        h2c0_channel.register_b_transport(this, &xdma::b_transport);
+        h2c0_channel.register_b_transport(this, &xdma::h2c_b_transport);
+        config_bar.register_b_transport(this, &xdma::config_bar_b_transport);
+        user_bar.register_b_transport(this, &xdma::user_bar_b_transport);
 
         SC_THREAD(before_clk);
         SC_THREAD(after_clk_h2c);
@@ -257,7 +256,7 @@ public:
         wait(SC_ZERO_TIME);
         bool first = true;
         while(true) {
-            wait(clk.posedge_event() | rst.negedge_event());
+            wait(clk.posedge_event() | resetn.negedge_event());
             if(!first) {
                 wait(e_after_h2c & e_after_c2h);
                 first = false;
@@ -292,7 +291,7 @@ public:
 
     void after_clk_h2c() {
         while(true) {
-            wait(clk.posedge_event() | rst.negedge_event());
+            wait(clk.posedge_event() | resetn.negedge_event());
             wait(e_before);
 
             /* h2c_recv_dsc_byp()  */
@@ -329,6 +328,7 @@ public:
                     tmp_h2c_dsc_byp_src_addr += MAX_LEN_PER_TRANSFER;
                     tmp_h2c_dsc_byp_dst_addr += MAX_LEN_PER_TRANSFER;
                     tmp_h2c_dsc_byp_len -= MAX_LEN_PER_TRANSFER;
+
                 }
             }
 
@@ -339,7 +339,7 @@ public:
 
     void after_clk_c2h() {
         while(true) {
-            wait(clk.posedge_event() | rst.negedge_event());
+            wait(clk.posedge_event() | resetn.negedge_event());
             wait(e_before);
 
             /* c2h_recv_dsc_byp()  */
@@ -364,4 +364,87 @@ public:
         }
     }
 
+
+    void h2c_b_transport(tlm::tlm_generic_payload& trans, sc_time& delay) {
+        unsigned int bus_width = AXIS_DATA_WIDTH / 8;
+		uint8_t *data = trans.get_data_ptr();
+		unsigned int len = trans.get_data_length();
+		unsigned int pos = 0;
+		genattr_extension *genattr;
+		bool eop = true;
+
+		// Since we're going to do waits in order to wiggle the
+		// AXI signals, we need to eliminate the accumulated
+		// TLM delay.
+		wait(delay, clk.posedge_event() | resetn.negedge_event());
+		delay = SC_ZERO_TIME;
+
+		m_mutex.lock();
+		// Get end of packet
+		trans.get_extension(genattr);
+		if (genattr) {
+			eop = genattr->get_eop();
+		}
+
+		do {
+			sc_bv<AXIS_DATA_WIDTH> tmp;
+			sc_bv<AXIS_DATA_WIDTH/8> keep;
+
+			for (unsigned int i = 0;
+				i < bus_width && pos < len; i++) {
+				int firstbit = i*8;
+				int lastbit = firstbit + 8-1;
+
+				tmp.range(lastbit, firstbit) = data[pos++];
+				keep[i] = true;
+			}
+			m_axis_h2c_tdata.write(tmp);
+			m_axis_h2c_tkeep.write(keep);
+
+			if (pos == len && eop) {
+				m_axis_h2c_tlast.write(true);
+			}
+
+			m_axis_h2c_tvalid.write(true);
+            
+            do {
+			    sc_core::wait(clk.posedge_event() | resetn.negedge_event());
+		    } while (m_axis_h2c_tready.read() == false && resetn.read() == true);
+
+			/* Abort transaction if reset is asserted. */
+			if (resetn.read() == false) {
+				trans.set_response_status(tlm::TLM_GENERIC_ERROR_RESPONSE);
+				m_mutex.unlock();
+				return;
+			}
+
+		} while (pos < len);
+
+		m_axis_h2c_tvalid.write(false);
+		m_axis_h2c_tlast.write(false);
+
+		trans.set_response_status(tlm::TLM_OK_RESPONSE);
+
+		m_mutex.unlock();
+    }
+
+    void config_bar_b_transport(tlm::tlm_generic_payload &trans, sc_time &delay) {
+
+    }
+
+    void user_bar_b_transport(tlm::tlm_generic_payload &trans, sc_time &delay) {
+
+    }
+
+
 };
+
+int sc_main() {
+
+
+
+
+}
+
+
+
