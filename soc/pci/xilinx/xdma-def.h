@@ -30,6 +30,8 @@ using namespace std;
 #include "remote-port-tlm.h"
 #include "remote-port-tlm-pci-ep.h"
 
+#define NR_MMIO_BAR 6
+#define NR_IRQ 15
 #define XDMA_H2C_OFS 0x0000UL
 #define XDMA_C2H_OFS 0x1000UL
 #define XDMA_CFG_OFS 0x3000UL
@@ -125,7 +127,7 @@ public:
     uint64_t tmp_c2h_dsc_byp_dst_addr = 0;
     uint32_t tmp_c2h_dsc_byp_len = 0;
     uint16_t tmp_c2h_dsc_byp_ctl = 0;
-    sc_time delay(SC_ZERO_TIME);
+    sc_time delay = SC_ZERO_TIME;
 
     // execute in order
     sc_event e_before, e_after_h2c, e_after_c2h;
@@ -298,10 +300,10 @@ public:
             if(h2c_dsc_byp_ready.read() && h2c_dsc_byp_load.read()) {
                 nxt_clk_h2c = true;
 
-                tmp_h2c_dsc_byp_src_addr = h2c_dsc_byp_src_addr;
-                tmp_h2c_dsc_byp_dst_addr = h2c_dsc_byp_dst_addr;
-                tmp_h2c_dsc_byp_len = h2c_dsc_byp_len;
-                tmp_h2c_dsc_byp_ctl = h2c_dsc_byp_ctl;
+                tmp_h2c_dsc_byp_src_addr = h2c_dsc_byp_src_addr.read().to_uint64();
+                tmp_h2c_dsc_byp_dst_addr = h2c_dsc_byp_dst_addr.read().to_uint64();
+                tmp_h2c_dsc_byp_len = h2c_dsc_byp_len.read().to_uint64();
+                tmp_h2c_dsc_byp_ctl = h2c_dsc_byp_ctl.read().to_uint64();
             }
 
             /* h2c_send()  */
@@ -346,10 +348,10 @@ public:
             if(c2h_dsc_byp_ready.read() && c2h_dsc_byp_load.read()) {
                 nxt_clk_c2h = true;
                 
-                tmp_c2h_dsc_byp_src_addr = c2h_dsc_byp_src_addr;
-                tmp_c2h_dsc_byp_dst_addr = c2h_dsc_byp_dst_addr;
-                tmp_c2h_dsc_byp_len = c2h_dsc_byp_len;
-                tmp_c2h_dsc_byp_ctl = c2h_dsc_byp_ctl;
+                tmp_c2h_dsc_byp_src_addr = c2h_dsc_byp_src_addr.read().to_uint64();
+                tmp_c2h_dsc_byp_dst_addr = c2h_dsc_byp_dst_addr.read().to_uint64();
+                tmp_c2h_dsc_byp_len = c2h_dsc_byp_len.read().to_uint64();
+                tmp_c2h_dsc_byp_ctl = c2h_dsc_byp_ctl.read().to_uint64();
             }
 
             // SC_THREAD for axis-slave
@@ -406,7 +408,7 @@ public:
 			}
 
 			m_axis_h2c_tvalid.write(true);
-            
+
             do {
 			    sc_core::wait(clk.posedge_event() | resetn.negedge_event());
 		    } while (m_axis_h2c_tready.read() == false && resetn.read() == true);
@@ -436,15 +438,9 @@ public:
 
     }
 
-
 };
 
 int sc_main() {
 
-
-
-
 }
-
-
 
