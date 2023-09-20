@@ -78,8 +78,8 @@ public:
 	tlm_utils::simple_initiator_socket<xdma> dma;
 
     /* H2C0 and C2H0 channels. */
-    tlm_utils::simple_target_socket<xdma> h2c0_channel;
-    tlm_utils::simple_initiator_socket<xdma> c2h0_channel;
+    // tlm_utils::simple_target_socket<xdma> h2c0_channel;
+    // tlm_utils::simple_initiator_socket<xdma> c2h0_channel;
 
     /* H2C signals.  */
     sc_in<bool> m_axis_h2c_tready;
@@ -139,8 +139,8 @@ public:
 		config_bar("config_bar"), // bar_num = 1
 		user_bar("user_bar"), // bar_num = 0
 		dma("dma"),
-        h2c0_channel("h2c0_channel"),
-        c2h0_channel("c2h0_channel"),
+        // h2c0_channel("h2c0_channel"),
+        // c2h0_channel("c2h0_channel"),
 
         m_axis_h2c_tready("m_axis_h2c_tready"),
         m_axis_h2c_tlast("m_axis_h2c_tlast"),
@@ -176,7 +176,7 @@ public:
         c2h_dsc_byp_ready.write(true);
         
         // In tg-tlm.h, to generate a transfer and send it to the socket.
-        h2c0_channel.register_b_transport(this, &xdma::h2c_b_transport);
+        // h2c0_channel.register_b_transport(this, &xdma::h2c_b_transport);
         config_bar.register_b_transport(this, &xdma::config_bar_b_transport);
         user_bar.register_b_transport(this, &xdma::user_bar_b_transport);
 
@@ -318,17 +318,65 @@ public:
                     // Using tlm2axis bridge b_transport()
                     /* Do transfer Write(tmp_h2c_dsc_byp_src_addr, tmp_h2c_dsc_byp_dst_addr, 
                         tmp_h2c_dsc_byp_len)  */
+
+                    char data[15] = {0};
+                    tlm::tlm_generic_payload trans[2];
+
+                    trans[0].set_command(tlm::TLM_READ_COMMAND);
+                    trans[0].set_data_ptr((unsigned char *)&data[0]);
+                    trans[0].set_streaming_width(tmp_h2c_dsc_byp_len);
+                    trans[0].set_data_length(tmp_h2c_dsc_byp_len);
+                    trans[0].set_address(tmp_h2c_dsc_byp_src_addr);
+
+                    // this.dma to forward the request
+                    // TBD
+
+                    trans[1].set_command(tlm::TLM_WRITE_COMMAND);
+                    trans[1].set_data_ptr((unsigned char *)&data[0]);
+                    trans[1].set_streaming_width(tmp_h2c_dsc_byp_len);
+                    trans[1].set_data_length(tmp_h2c_dsc_byp_len);
+                    trans[1].set_address(0);
+                    genattr_extension *genattr = new genattr_extension();
+                    genattr->set_eop(false);
+                    trans[1].set_extension(genattr);
+                    h2c_tlm2axis(trans[1], delay);
+
+                    tmp_h2c_dsc_byp_src_addr = 0;
+                    tmp_h2c_dsc_byp_dst_addr = 0;
+                    tmp_h2c_dsc_byp_len = 0;
+                    tmp_h2c_dsc_byp_ctl = 0;
+
                     h2c_idle = true;
                     m_axis_h2c_tlast.write(false);
                     m_axis_h2c_tvalid.write(false);
                 }
                 else {
                     m_axis_h2c_tvalid.write(true);
-                    // Using tlm2axis bridge b_transport()
-                    /* Do transfer Write(tmp_h2c_dsc_byp_src_addr, tmp_h2c_dsc_byp_dst_addr, 
-                        MAX_LEN_PER_TRANSFER)  */
+                    
+                    char data[15] = {0};
+                    tlm::tlm_generic_payload trans[2];
+
+                    trans[0].set_command(tlm::TLM_READ_COMMAND);
+                    trans[0].set_data_ptr((unsigned char *)&data[0]);
+                    trans[0].set_streaming_width(8);
+                    trans[0].set_data_length(8);
+                    trans[0].set_address(tmp_h2c_dsc_byp_src_addr);
+
+                    // this.dma to forward the request
+                    // TBD
+
+                    trans[1].set_command(tlm::TLM_WRITE_COMMAND);
+                    trans[1].set_data_ptr((unsigned char *)&data[0]);
+                    trans[1].set_streaming_width(8);
+                    trans[1].set_data_length(8);
+                    trans[1].set_address(0);
+                    genattr_extension *genattr = new genattr_extension();
+                    genattr->set_eop(false);
+                    trans[1].set_extension(genattr);
+                    h2c_tlm2axis(trans[1], delay);
+
                     tmp_h2c_dsc_byp_src_addr += MAX_LEN_PER_TRANSFER;
-                    tmp_h2c_dsc_byp_dst_addr += MAX_LEN_PER_TRANSFER;
+                    // tmp_h2c_dsc_byp_dst_addr += MAX_LEN_PER_TRANSFER;
                     tmp_h2c_dsc_byp_len -= MAX_LEN_PER_TRANSFER;
 
                 }
@@ -359,7 +407,66 @@ public:
             /* c2h_recv()  */
             // Using b_transport
             if(!c2h_idle) {
+                if (tmp_c2h_dsc_byp_len <= MAX_LEN_PER_TRANSFER) {
+                    s_axis_c2h_tready.write(true);
+                    
+                    char data[80];
+                    tlm::tlm_generic_payload gp;
+                    unsigned int pos = 0;
+                    unsigned int bus_width = AXIS_DATA_WIDTH / 8;
+                    genattr_extension *genattr = new genattr_extension();
 
+                    gp.set_command(tlm::TLM_WRITE_COMMAND);
+                    gp.set_address(tmp_c2h_dsc_byp_dst_addr);
+                    gp.set_data_ptr(reinterpret_cast<unsigned char*>(data[0]));
+                    // gp.set_byte_enable_ptr(NULL);
+                    // gp.set_byte_enable_length(0);
+                    gp.set_extension(genattr);
+
+
+
+                if (s_axis_c2h_tvalid.read()) {
+                    unsigned int last_byte = get_last_byte();
+                    unsigned int i;
+
+                    for (i = 0; i < bus_width; i++) {
+                        if (s_axis_c2h_tkeep.read().bit(i)) {
+                            unsigned int firstbit = i * 8;
+                            unsigned int lastbit = firstbit + 8 - 1;
+
+                            data[pos++] =
+                                s_axis_c2h_tdata.read().range(lastbit, firstbit).to_uint();
+
+                            if (pos == AXIS_DATA_WIDTH) {
+                                if (s_axis_c2h_tlast.read() && i == last_byte) {
+                                    genattr->set_eop();
+                                }
+
+                                // run_tlm(gp, pos);
+                                // tlm packets toward 
+
+                                genattr->set_eop(false);
+                            }
+                        }
+                    }
+
+                    if (m_axis_h2c_tlast.read() && pos > 0) {
+                        genattr->set_eop();
+
+                        // run_tlm(gp, pos);
+
+                        genattr->set_eop(false);
+                    }
+                }
+                    
+                    
+                    
+                    
+                    s_axis_c2h_tready.write(false);
+                }
+                else {
+
+                }
             }
 
             e_after_c2h.notify();
@@ -367,7 +474,7 @@ public:
     }
 
 
-    void h2c_b_transport(tlm::tlm_generic_payload& trans, sc_time& delay) {
+    void h2c_tlm2axis(tlm::tlm_generic_payload& trans, sc_time& delay) {
         unsigned int bus_width = AXIS_DATA_WIDTH / 8;
 		uint8_t *data = trans.get_data_ptr();
 		unsigned int len = trans.get_data_length();
@@ -437,6 +544,21 @@ public:
     void user_bar_b_transport(tlm::tlm_generic_payload &trans, sc_time &delay) {
 
     }
+
+    unsigned int get_last_byte()
+	{
+		unsigned int bus_width = AXIS_DATA_WIDTH / 8;
+		unsigned int last_byte = 0;
+		unsigned int i;
+
+		for (i = 0; i < bus_width; i++) {
+			if (s_axis_c2h_tkeep.read().bit(i)) {
+				last_byte = i;
+			}
+		}
+
+		return last_byte;
+	}
 
 };
 
