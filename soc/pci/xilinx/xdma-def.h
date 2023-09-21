@@ -1,3 +1,33 @@
+/* Modified by libnas.  */
+
+/*
+ * TLM-2.0 model of the Xilinx XDMA.
+ *
+ * Currently only supports PCIe-AXI brigde mode in tandem with QEMU.
+ *
+ * Copyright (c) 2020 Xilinx Inc.
+ * Written by Edgar E. Iglesias.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ */
+#ifndef PCI_XILINX_XDMA_DEF_H__
+#define PCI_XILINX_XDMA_DEF_H__
 #define SC_INCLUDE_DYNAMIC_PROCESSES
 
 #include <stdint.h>
@@ -43,6 +73,7 @@ using namespace std;
 #define MAX_LEN_PER_TRANSFER 8
 #define D(x)
 uint32_t regs[XDMA_MAX_SIZE >> 2];
+uint32_t axi_regs[0xA8];
 const int config_bar_pos = 0;
 const int bypass_bar_pos = 1;
 
@@ -185,75 +216,6 @@ public:
         SC_THREAD(after_clk_c2h);
     }
 
-    /* Transfer data from the Host 2 the Card (h2c = true),
-	   Card 2 Host (h2c = false).  */
-    /* Need to be modified to deal with the corner condition.
-        the left part of XDMA that connected to the pcie-ctrl should use tlm trans
-        while the right part that connected to the DUT should analysis the valid data.
-        The transfer per clock should only with 8-bytes.(data width)  */ 
-    /*
-	int do_mm_dma(uint64_t src_addr, uint64_t dst_addr, uint64_t size,
-			bool h2c)
-	{
-		uint64_t i;
-		sc_time delay(SC_ZERO_TIME);
-		struct {
-			tlm::tlm_generic_payload trans;
-			const char *name;
-		} trans_ext[2];
-		uint64_t data;
-
-		trans_ext[0].trans.set_command(tlm::TLM_READ_COMMAND);
-		trans_ext[0].trans.set_data_ptr((unsigned char *)&data);
-		trans_ext[0].trans.set_streaming_width(8);
-		trans_ext[0].trans.set_data_length(8);
-
-		trans_ext[1].trans.set_command(tlm::TLM_WRITE_COMMAND);
-		trans_ext[1].trans.set_data_ptr((unsigned char *)&data);
-		trans_ext[1].trans.set_streaming_width(8);
-		trans_ext[1].trans.set_data_length(8);
-
-		for (i = 0; i < size-8; i+=8) {
-			trans_ext[0].trans.set_address(src_addr);
-			trans_ext[1].trans.set_address(dst_addr);
-			src_addr += 8;
-			dst_addr += 8;
-
-			if (h2c) {
-				this->dma->b_transport(
-					trans_ext[0].trans, delay);
-			} else {
-				this->card_bus->b_transport(
-					trans_ext[0].trans, delay);
-			}
-
-			if (trans_ext[0].trans.get_response_status() !=
-				tlm::TLM_OK_RESPONSE) {
-				SC_REPORT_ERROR("xdma",
-					"error while fetching the data");
-				return -1;
-			}
-
-			if (h2c) {
-				this->card_bus->b_transport(
-					trans_ext[1].trans, delay);
-			} else {
-				this->dma->b_transport(
-					trans_ext[1].trans, delay);
-			}
-
-			if (trans_ext[1].trans.get_response_status() !=
-				tlm::TLM_OK_RESPONSE) {
-				SC_REPORT_ERROR("xdma",
-					"error while pushing the data");
-				return -1;
-			}
-		}
-
-		return 0;
-	}
-    */
-
     void before_clk() {
         wait(SC_ZERO_TIME);
         bool first = true;
@@ -330,6 +292,7 @@ public:
 
                     // this.dma to forward the request
                     // TBD
+                    dma->b_transport(trans[0],delay);
 
                     trans[1].set_command(tlm::TLM_WRITE_COMMAND);
                     trans[1].set_data_ptr((unsigned char *)&data[0]);
@@ -364,6 +327,7 @@ public:
 
                     // this.dma to forward the request
                     // TBD
+                    dma->b_transport(trans[0],delay);
 
                     trans[1].set_command(tlm::TLM_WRITE_COMMAND);
                     trans[1].set_data_ptr((unsigned char *)&data[0]);
@@ -419,54 +383,52 @@ public:
                     gp.set_command(tlm::TLM_WRITE_COMMAND);
                     gp.set_address(tmp_c2h_dsc_byp_dst_addr);
                     gp.set_data_ptr(reinterpret_cast<unsigned char*>(data[0]));
-                    // gp.set_byte_enable_ptr(NULL);
-                    // gp.set_byte_enable_length(0);
+                    gp.set_byte_enable_ptr(NULL);
+                    gp.set_byte_enable_length(0);
                     gp.set_extension(genattr);
 
+                    if (s_axis_c2h_tvalid.read()) {
+                        unsigned int last_byte = get_last_byte();
+                        unsigned int i;
+
+                        for (i = 0; i < bus_width; i++) {
+                            if (s_axis_c2h_tkeep.read().bit(i)) {
+                                unsigned int firstbit = i * 8;
+                                unsigned int lastbit = firstbit + 8 - 1;
+
+                                data[pos++] =
+                                    s_axis_c2h_tdata.read().range(lastbit, firstbit).to_uint();
+
+                                if (pos == AXIS_DATA_WIDTH) {
+                                    if (s_axis_c2h_tlast.read() && i == last_byte) {
+                                        genattr->set_eop();
+                                    }
+
+                                    run_tlm(gp, pos);
+                                    // tlm packets toward 
+                                    genattr->set_eop(false);
 
 
-                if (s_axis_c2h_tvalid.read()) {
-                    unsigned int last_byte = get_last_byte();
-                    unsigned int i;
 
-                    for (i = 0; i < bus_width; i++) {
-                        if (s_axis_c2h_tkeep.read().bit(i)) {
-                            unsigned int firstbit = i * 8;
-                            unsigned int lastbit = firstbit + 8 - 1;
-
-                            data[pos++] =
-                                s_axis_c2h_tdata.read().range(lastbit, firstbit).to_uint();
-
-                            if (pos == AXIS_DATA_WIDTH) {
-                                if (s_axis_c2h_tlast.read() && i == last_byte) {
-                                    genattr->set_eop();
                                 }
-
-                                // run_tlm(gp, pos);
-                                // tlm packets toward 
-
-                                genattr->set_eop(false);
                             }
                         }
+
+                        if (m_axis_h2c_tlast.read() && pos > 0) {
+                            genattr->set_eop();
+
+                            run_tlm(gp, pos);
+
+                            genattr->set_eop(false);
+                        }
+                        s_axis_c2h_tready.write(false);
                     }
 
-                    if (m_axis_h2c_tlast.read() && pos > 0) {
-                        genattr->set_eop();
-
-                        // run_tlm(gp, pos);
-
-                        genattr->set_eop(false);
-                    }
-                }
-                    
-                    
-                    
-                    
-                    s_axis_c2h_tready.write(false);
                 }
                 else {
-
+                    // TBD
                 }
+                
             }
 
             e_after_c2h.notify();
@@ -537,12 +499,61 @@ public:
 		m_mutex.unlock();
     }
 
+    // Do transaction in uint32_t array regs.
     void config_bar_b_transport(tlm::tlm_generic_payload &trans, sc_time &delay) {
-
-    }
+        tlm::tlm_command cmd = trans.get_command();
+		sc_dt::uint64 addr = trans.get_address();
+		unsigned char *data = trans.get_data_ptr();
+		unsigned int len = trans.get_data_length();
+		unsigned char *byte_en = trans.get_byte_enable_ptr();
+		unsigned int s_width = trans.get_streaming_width();
+		uint32_t v = 0;
+        if (byte_en || len > 4 || s_width < len) {
+			goto err;
+		}
+		if (cmd == tlm::TLM_READ_COMMAND) {
+			v = regs[addr >> 2];
+            memcpy(data, &v, len);
+		}
+        if (cmd == tlm::TLM_WRITE_COMMAND) {
+            memcpy(&v, data, len);
+            regs[addr >> 2] = v;
+        }
+        trans.set_response_status(tlm::TLM_OK_RESPONSE);
+		return;
+    err:
+		SC_REPORT_WARNING("xdma",
+				"unsupported read / write on the config bar");
+		trans.set_response_status(tlm::TLM_GENERIC_ERROR_RESPONSE);
+		return;
+	}
 
     void user_bar_b_transport(tlm::tlm_generic_payload &trans, sc_time &delay) {
-
+        tlm::tlm_command cmd = trans.get_command();
+		sc_dt::uint64 addr = trans.get_address();
+		unsigned char *data = trans.get_data_ptr();
+		unsigned int len = trans.get_data_length();
+		unsigned char *byte_en = trans.get_byte_enable_ptr();
+		unsigned int s_width = trans.get_streaming_width();
+		uint32_t v = 0;
+        if (byte_en || len > 4 || s_width < len) {
+			goto err;
+		}
+		if (cmd == tlm::TLM_READ_COMMAND) {
+			v = axi_regs[addr >> 2];
+            memcpy(data, &v, len);
+		}
+        if (cmd == tlm::TLM_WRITE_COMMAND) {
+            memcpy(&v, data, len);
+            axi_regs[addr >> 2] = v;
+        }
+        trans.set_response_status(tlm::TLM_OK_RESPONSE);
+		return;
+    err:
+		SC_REPORT_WARNING("xdma",
+				"unsupported read / write on the config bar");
+		trans.set_response_status(tlm::TLM_GENERIC_ERROR_RESPONSE);
+		return;
     }
 
     unsigned int get_last_byte()
@@ -560,9 +571,23 @@ public:
 		return last_byte;
 	}
 
+    void run_tlm(tlm::tlm_generic_payload& gp, unsigned int &pos)
+	{
+
+		gp.set_data_length(pos);
+		gp.set_streaming_width(pos);
+		gp.set_response_status(tlm::TLM_INCOMPLETE_RESPONSE);
+
+		dma->b_transport(gp, delay);
+
+		s_axis_c2h_tready.write(false);
+		wait(delay);
+		s_axis_c2h_tready.write(true);
+
+		pos = 0;
+	}
+
+
+
 };
-
-int sc_main() {
-
-}
-
+#endif
